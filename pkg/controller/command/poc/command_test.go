@@ -78,6 +78,18 @@ func TestNewDID(t *testing.T) {
 		require.NoError(t, err)
 
 		fmt.Println(response)
+
+		var didDoc map[string]interface{}
+
+		// Decode DIDDoc content
+		err = json.Unmarshal(response.DIDDoc, &didDoc)
+		require.NoError(t, err)
+
+		prettyDidDoc, err := json.MarshalIndent(didDoc, "", "  ")
+		require.NoError(t, err)
+
+		fmt.Printf("DID Document: %s\n", string(prettyDidDoc))
+
 		fmt.Println()
 		//require.Equal(t, 5, len(handlers))
 	})
