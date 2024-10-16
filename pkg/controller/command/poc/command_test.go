@@ -9,6 +9,7 @@ package poc
 import (
 	"bytes"
 	"fmt"
+
 	"github.com/hyperledger/aries-framework-go/pkg/controller/command/vcwallet"
 	"github.com/hyperledger/aries-framework-go/pkg/controller/command/vdr"
 	"github.com/hyperledger/aries-framework-go/pkg/didcomm/protocol/didexchange"
@@ -28,6 +29,8 @@ import (
 	mockstore "github.com/hyperledger/aries-framework-go/pkg/mock/storage"
 	"github.com/square/go-jose/v3/json"
 	"github.com/stretchr/testify/require"
+
+	mockvdr "github.com/hyperledger/aries-framework-go/pkg/mock/vdr"
 
 	"testing"
 )
@@ -53,13 +56,19 @@ func TestNewDID(t *testing.T) {
 
 		vdrCommand, err := vdr.New(&mockprovider.Provider{
 			StorageProviderValue: mockstore.NewMockStoreProvider(),
+			VDRegistryValue:      &mockvdr.MockVDRegistry{}, // Mock VDRegistry
 		})
 		require.NotNil(t, vdrCommand)
 		require.NoError(t, err)
 
+		// fmt.Printf("VDR Command: %+v\n", vdrCommand)
 		command, err := New(vdrCommand, vcwalletCommand)
 		require.NoError(t, err)
+
+		// fmt.Printf("Reader: %+v\n", reader)
+		// fmt.Printf("Command: %+v\n", command)
 		err = command.NewDID(&l, reader)
+
 		require.NoError(t, err)
 		require.NotNil(t, command)
 
@@ -85,8 +94,8 @@ func TestNewDID(t *testing.T) {
 		require.Nil(t, cmd)
 	})*/
 }
-func readDIDtesting(t *testing.T){
-	
+func readDIDtesting(t *testing.T) {
+
 }
 func newMockProvider(t *testing.T) *mockprovider.Provider {
 	t.Helper()
