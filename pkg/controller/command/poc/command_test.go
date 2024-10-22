@@ -32,9 +32,14 @@ import (
 
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
+	"github.com/hyperledger/aries-framework-go/internal/testdata"
+	"github.com/hyperledger/aries-framework-go/pkg/doc/did"
+	vdrapi "github.com/hyperledger/aries-framework-go/pkg/framework/aries/api/vdr"
 	mockvdr "github.com/hyperledger/aries-framework-go/pkg/mock/vdr"
+	"github.com/hyperledger/aries-framework-go/pkg/vdr/key"
 	"github.com/hyperledger/aries-framework-go/pkg/wallet"
 	"github.com/stretchr/testify/assert"
 
@@ -276,108 +281,80 @@ func TestGetVCredential(t *testing.T) {
 	})
 }
 
-/**
 func TestGenerateVP(t *testing.T) {
-	t.Run("test GenerateVP method - success", func(t *testing.T) {
-		const (
-			sampleUser     = "sampleUser1"
-			sampleCredId   = "http://example.edu/credentials/1872"
-			fakePassphrase = "fakepassphrase"
-		)
+	const (
+		sampleUser1    = "sampleUser1"
+		fakePassphrase = "fakepassphrase"
+	)
 
-		// Define request arguments for GenerateVP
-		getVPArgs := GenerateVPArgs{
-			CredId: sampleCredId,
-			QueryByFrame: QueryByFrame{
-				Frame: FrameFluidos{
-					Context: []string{
-						"https://www.w3.org/2018/credentials/v1",
-						"https://www.w3.org/2018/credentials/examples/v1",
-						"https://ssiproject.inf.um.es/security/psms/v1",
-						"https://ssiproject.inf.um.es/poc/context/v1",
-					},
-					Type: []string{
-						"VerifiableCredential",
-						"FluidosCredential",
-					},
-					Explicit: true,
-					// Declare the attributes we want to disclose
-					CredentialSubject: map[string]interface{}{
-						"@explicit":   true,       // Ensure only specified fields are disclosed
-						"fluidosRole": struct{}{}, // Not revealing the actual content
-						"holderName":  struct{}{}, // Not revealing the actual content
-					},
-				},
-			},
+	// Simulated provider
+	mockctx := newMockProvider(t)
+	mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+	vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(mockctx)
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Create sample profile
+	err = command.createSampleUserProfile(t, sampleUser1, fakePassphrase)
+	require.NoError(t, err)
+
+	token1, lock1 := command.unlockWallet(t, sampleUser1, fakePassphrase)
+	defer lock1()
+
+	// Add sample credential to wallet
+	var sampleNewUDCVc map[string]interface{}
+	err = json.Unmarshal(testdata.SampleUDCVC, &sampleNewUDCVc)
+	require.NoError(t, err)
+
+	sampleNewUDCVc["id"] = "http://example.edu/credentials/18722"
+
+	// Add credential to wallet
+	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVc, "")
+	require.NoError(t, err)
+
+	// sampleUDCVCWithProofBBS includes a proof object, which is essential for credential
+	// verification. This provides information that allows systems to validate that the
+	// credential has not been tampered with and that it comes from a legitimate source.
+	var sampleNewUDCVProofBBS map[string]interface{}
+	err = json.Unmarshal(testdata.SampleUDCVCWithProofBBS, &sampleNewUDCVProofBBS)
+	require.NoError(t, err)
+
+	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
+	require.NoError(t, err)
+
+	t.Run("successfully create command and generate verifiable presentation", func(t *testing.T) {
+		var queryByFrame QueryByFrame
+		err := json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
+		require.NoError(t, err)
+
+		request := &GenerateVPArgs{
+			CredId:       "http://example.edu/credentials/18722",
+			QueryByFrame: queryByFrame,
 		}
-		var l bytes.Buffer
-		reader, err := getReader(getVPArgs)
-		require.NoError(t, err)
-		require.NotNil(t, reader)
 
-		// Mocks (vcwallet and vdr)
-		vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
-		require.NotNil(t, vcwalletCommand)
-
-		vdrCommand, err := vdr.New(&mockprovider.Provider{
-			StorageProviderValue: mockstore.NewMockStoreProvider(),
-			VDRegistryValue:      &mockvdr.MockVDRegistry{},
-		})
-		require.NoError(t, err)
-		require.NotNil(t, vdrCommand)
-
-		command, err := New(vdrCommand, vcwalletCommand)
-		require.NoError(t, err)
-		require.NotNil(t, command)
-
-		// Create sample profile and unlock wallet
-		err = command.createSampleUserProfile(t, sampleUser, fakePassphrase)
+		reqBody, err := json.Marshal(request)
 		require.NoError(t, err)
 
-		token1, lock1 := command.unlockWallet(t, sampleUser, fakePassphrase)
-		defer lock1()
+		var b bytes.Buffer
+		cmdErr := command.GenerateVP(&b, bytes.NewReader(reqBody))
+		require.NoError(t, cmdErr)
 
-		// Add credential to wallet
-		vc := map[string]interface{}{
-			"@context":     []string{"https://www.w3.org/2018/credentials/v1"},
-			"id":           sampleCredId,
-			"type":         []string{"VerifiableCredential", "FluidosCredential"},
-			"issuer":       map[string]interface{}{"id": "did:example:123"},
-			"issuanceDate": "2024-10-21T09:00:00Z",
-			"credentialSubject": map[string]interface{}{
-				"id":          "did:example:456",
-				"name":        "John Doe",
-				"fluidosRole": "Admin",
-				"holderName":  "John Doe",
-			},
-		}
-		err = command.AddCredentialToWallet(sampleUser, token1, wallet.Credential, vc, "")
-		require.NoError(t, err)
-
-		// Ejecutar el método GenerateVP
-		err = command.GenerateVP(&l, reader)
-		require.NoError(t, err)
-
-		// Validar el resultado
 		var response GenerateVPResultCustom
-		err = json.NewDecoder(&l).Decode(&response)
-		require.NoError(t, err)
+		require.NoError(t, json.NewDecoder(&b).Decode(&response))
+		require.NotEmpty(t, response)
+		require.NotEmpty(t, response.Results)
 
-		require.NotNil(t, response)
-		fmt.Printf("Verifiable Presentation response: %+v\n", response)
-
-		// Verificar el contenido de la presentación
-		var vp map[string]interface{}
-		err = json.Unmarshal(*response.Results[0], &vp)
-		require.NoError(t, err)
-
-		prettyVP, err := json.MarshalIndent(vp, "", "  ")
-		require.NoError(t, err)
-
-		fmt.Printf("Verifiable Presentation: %s\n", string(prettyVP))
+		t.Log("Prueba de generación de VP exitosa con resultado:", response.Results)
 	})
 }
-**/
 
 func readDIDtesting(t *testing.T) {
 
@@ -474,6 +451,25 @@ func (o *Command) AddCredentialToWallet(userID string, walletAuth string, conten
 	}
 
 	return nil
+}
+
+func getMockDIDKeyVDR() *mockvdr.MockVDRegistry {
+	return &mockvdr.MockVDRegistry{
+		ResolveFunc: func(didID string, opts ...vdrapi.DIDMethodOption) (*did.DocResolution, error) {
+			if strings.HasPrefix(didID, "did:key:") {
+				k := key.New()
+
+				d, e := k.Read(didID)
+				if e != nil {
+					return nil, e
+				}
+
+				return d, nil
+			}
+
+			return nil, fmt.Errorf("did not found")
+		},
+	}
 }
 
 func setupMockEnrolmentServer(t *testing.T) *httptest.Server {
