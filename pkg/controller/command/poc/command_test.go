@@ -8,6 +8,7 @@ package poc
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 
 	"github.com/hyperledger/aries-framework-go/pkg/controller/command/vcwallet"
@@ -36,9 +37,12 @@ import (
 	"time"
 
 	"github.com/hyperledger/aries-framework-go/internal/testdata"
+	"github.com/hyperledger/aries-framework-go/pkg/crypto/tinkcrypto"
 	"github.com/hyperledger/aries-framework-go/pkg/doc/did"
 	vdrapi "github.com/hyperledger/aries-framework-go/pkg/framework/aries/api/vdr"
+	"github.com/hyperledger/aries-framework-go/pkg/kms"
 	mockvdr "github.com/hyperledger/aries-framework-go/pkg/mock/vdr"
+	"github.com/hyperledger/aries-framework-go/pkg/vdr/fingerprint"
 	"github.com/hyperledger/aries-framework-go/pkg/vdr/key"
 	"github.com/hyperledger/aries-framework-go/pkg/wallet"
 	"github.com/stretchr/testify/assert"
@@ -116,6 +120,76 @@ func TestNewDID(t *testing.T) {
 		require.Contains(t, err.Error(), "new did store")
 		require.Nil(t, cmd)
 	})*/
+}
+
+func TestCommand_SignJWT(t *testing.T) {
+	const (
+		sampleUser1 = "sampleUser1"
+		samplePass  = "fakepassphrase"
+		sampleDID   = "did:example:123"
+	)
+
+	// Mock del contexto
+	mockctx := newMockProvider(t)
+	mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+	// Inicializa el proveedor de criptografía
+	tcrypto, err := tinkcrypto.New()
+	require.NoError(t, err)
+
+	mockctx.CryptoValue = tcrypto
+
+	vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(mockctx)
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Create sample profile
+	err = command.createSampleUserProfile(t, sampleUser1, samplePass)
+	require.NoError(t, err)
+
+	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
+	defer lock1()
+
+	t.Run("test SignJWT method - success", func(t *testing.T) {
+		var b bytes.Buffer
+
+		addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+			WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
+			KeyType:    kms.ED25519Type,
+		})
+		require.NoError(t, err)
+
+		err = command.vcwalletcommand.CreateKeyPair(&b, addCreateKey)
+		require.NoError(t, err)
+
+		var keyPairResponse vcwallet.CreateKeyPairResponse
+		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
+
+		pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
+		require.NoError(t, err)
+
+		_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
+		parts := strings.Split(didKID, "#")
+		currentDID := parts[0]
+		currentKeyID := parts[1]
+
+		b.Reset()
+
+		command.walletuid = sampleUser1
+		command.currentDID = currentDID
+		command.currentKeyPair = keyPairResponse
+		command.currentKeyPair.KeyID = currentKeyID
+
+		signedJWT := command.signJWT(token)
+		require.NotEmpty(t, signedJWT)
+	})
 }
 
 func TestDoDeviceEnrolment(t *testing.T) {
@@ -330,7 +404,7 @@ func TestGenerateVP(t *testing.T) {
 	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
 	require.NoError(t, err)
 
-	t.Run("successfully create command and generate verifiable presentation", func(t *testing.T) {
+	t.Run("successfully generate verifiable presentation", func(t *testing.T) {
 		var queryByFrame QueryByFrame
 		err := json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
 		require.NoError(t, err)
@@ -355,6 +429,200 @@ func TestGenerateVP(t *testing.T) {
 		t.Log("Prueba de generación de VP exitosa con resultado:", response.Results)
 	})
 }
+
+func TestVerifyCredential(t *testing.T) {
+	const (
+		sampleUser1    = "sampleUser1"
+		fakePassphrase = "fakepassphrase"
+	)
+
+	// Simulated provider
+	mockctx := newMockProvider(t)
+	mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+	vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(mockctx)
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Create sample profile
+	err = command.createSampleUserProfile(t, sampleUser1, fakePassphrase)
+	require.NoError(t, err)
+
+	token1, lock1 := command.unlockWallet(t, sampleUser1, fakePassphrase)
+	defer lock1()
+
+	// Add sample credential to wallet
+	var sampleNewUDCVc map[string]interface{}
+	err = json.Unmarshal(testdata.SampleUDCVC, &sampleNewUDCVc)
+	require.NoError(t, err)
+
+	sampleNewUDCVc["id"] = "http://example.edu/credentials/18722"
+
+	// Add credential to wallet
+	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVc, "")
+	require.NoError(t, err)
+
+	// sampleUDCVCWithProofBBS includes a proof object, which is essential for credential
+	// verification. This provides information that allows systems to validate that the
+	// credential has not been tampered with and that it comes from a legitimate source.
+	var sampleNewUDCVProofBBS map[string]interface{}
+	err = json.Unmarshal(testdata.SampleUDCVCWithProofBBS, &sampleNewUDCVProofBBS)
+	require.NoError(t, err)
+
+	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
+	require.NoError(t, err)
+
+	t.Run("successfully issue VP and verify it", func(t *testing.T) {
+		// Part I: Issue VP
+		var queryByFrame QueryByFrame
+		err := json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
+		require.NoError(t, err)
+
+		request := &GenerateVPArgs{
+			CredId:       "http://example.edu/credentials/18722",
+			QueryByFrame: queryByFrame,
+		}
+
+		reqBody, err := json.Marshal(request)
+		require.NoError(t, err)
+
+		var b bytes.Buffer
+		cmdErr := command.GenerateVP(&b, bytes.NewReader(reqBody))
+		require.NoError(t, cmdErr)
+
+		var res GenerateVPResultCustom
+		require.NoError(t, json.NewDecoder(&b).Decode(&res))
+		require.NotEmpty(t, res)
+		require.NotEmpty(t, res.Results)
+
+		var l bytes.Buffer
+		reader, err := getReader(VerifyCredentialArgs{CredentialString: string(*res.Results[0])})
+		require.NotNil(t, reader)
+		require.NoError(t, err)
+
+		// Part II: call VerifyCredential method
+		err = command.VerifyCredential(&l, reader)
+		require.NoError(t, err)
+
+		// Validate response
+		var response VerifyCredentialResult
+		err = json.NewDecoder(&l).Decode(&response)
+		require.NoError(t, err)
+
+		// Assert result
+		require.True(t, response.Result)
+		// Print result
+		fmt.Printf("Credential verification result: %v\n", response.Result)
+	})
+}
+
+/**
+func TestAcceptEnrolment(t *testing.T) {
+	t.Run("test AcceptEnrolment method - success", func(t *testing.T) {
+		const (
+			sampleUser     = "sampleUser1"
+			fakePassphrase = "fakepassphrase"
+			sampleDID      = "did:peer:21tDAKCERh95uGgKbJNHYp"
+		)
+
+		// idProofs definition
+		idProofs := []IdProof{
+			{AttrName: "holderName", AttrValue: "FluidosNode"},
+			{AttrName: "fluidosRole", AttrValue: "Customer"},
+			{AttrName: "deviceType", AttrValue: "Server"},
+			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
+			{AttrName: "DID", AttrValue: sampleDID},
+		}
+
+		// AcceptEnrolment arguments
+		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: idProofs}
+
+		var l bytes.Buffer
+		reader, err := getReader(acceptEnrolmentArgs)
+		require.NotNil(t, reader)
+		require.NoError(t, err)
+
+		// Simulated provider
+		mockctx := newMockProvider(t)
+		mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+		vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+		require.NotNil(t, vcwalletCommand)
+
+		vdrCommand, err := vdr.New(mockctx)
+		require.NotNil(t, vdrCommand)
+		require.NoError(t, err)
+
+		// Command instance
+		command, err := New(vdrCommand, vcwalletCommand)
+		require.NoError(t, err)
+
+		// Create sample profile
+		err = command.createSampleUserProfile(t, sampleUser, fakePassphrase)
+		require.NoError(t, err)
+
+		token, lock := command.unlockWallet(t, sampleUser, fakePassphrase)
+		defer lock()
+
+		// Agregar credencial a la billetera
+		baseCred := map[string]interface{}{
+			"@context": []string{"https://www.w3.org/2018/credentials/v1"},
+			"id":       "http://example.edu/credentials/123",
+			"type":     []string{"VerifiableCredential"},
+			"issuer": map[string]interface{}{
+				"id": "did:peer:21tDAKCERh95uGgKbJNHYp",
+			},
+			"issuanceDate": "2024-10-23T00:00:00Z",
+			"credentialSubject": map[string]interface{}{
+				"id":     "did:peer:21tDAKCERh95uGgKbJNHYp",
+				"name":   "John Doe",
+				"degree": "Bachelor of Science",
+				"year":   2024,
+			},
+		}
+
+		// Define currentDID
+		command.currentDID = sampleDID
+
+		// Add DID To VDR
+		command.AddDIDToVDR(t)
+
+		// Asegúrate de que el método que usas para agregar a la billetera espera datos en el formato correcto
+		err = command.AddCredentialToWallet(sampleUser, token, wallet.Credential, baseCred, "")
+		require.NoError(t, err)
+
+		// Llamar al método AcceptEnrolment
+		err = command.AcceptEnrolment(&l, reader)
+		require.NoError(t, err)
+
+		// Verificar el resultado
+		var response AcceptEnrolmentResult
+		err = json.NewDecoder(&l).Decode(&response)
+		require.NoError(t, err)
+
+		require.NotNil(t, response)
+
+		// Imprimir el resultado de la credencial emitida
+		var didDoc map[string]interface{}
+		err = json.Unmarshal(response.Credential, &didDoc)
+		require.NoError(t, err)
+
+		prettyDidDoc, err := json.MarshalIndent(didDoc, "", "  ")
+		require.NoError(t, err)
+
+		fmt.Printf("Credential: %s\n", string(prettyDidDoc))
+
+		fmt.Println("AcceptEnrolment executed successfully.")
+	})
+}
+**/
 
 func readDIDtesting(t *testing.T) {
 
@@ -453,6 +721,54 @@ func (o *Command) AddCredentialToWallet(userID string, walletAuth string, conten
 	return nil
 }
 
+func (o *Command) AddDIDToVDR(t *testing.T) error {
+	doc := map[string]interface{}{
+		"@context": []string{
+			"https://www.w3.org/ns/did/v1",
+			"https://w3id.org/did/v2",
+		},
+		"id": "did:peer:21tDAKCERh95uGgKbJNHYp",
+		"verificationMethod": []map[string]interface{}{
+			{
+				"id":              "did:peer:123456789abcdefghi#keys-1",
+				"type":            "Secp256k1VerificationKey2018",
+				"controller":      "did:peer:123456789abcdefghi",
+				"publicKeyBase58": "H3C2AVvLMv6gmMNam3uVAjZpfkcJCwDwnZn6z3wXmqPV",
+			},
+			{
+				"id":         "did:peer:123456789abcdefghw#key2",
+				"type":       "RsaVerificationKey2018",
+				"controller": "did:peer:123456789abcdefghw",
+				"publicKeyPem": `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAryQICCl6NZ5gDKrnSztO
+3Hy8PEUcuyvg/ikC+VcIo2SFFSf18a3IMYldIugqqqZCs4/4uVW3sbdLs/6PfgdX
+7O9D22ZiFWHPYA2k2N744MNiCD1UE+tJyllUhSblK48bn+v1oZHCM0nYQ2NqUkvS
+j+hwUU3RiWl7x3D2s9wSdNt7XUtW05a/FXehsPSiJfKvHJJnGOX0BgTvkLnkAOTd
+OrUZ/wK69Dzu4IvrN4vs9Nes8vbwPa/ddZEzGR0cQMt0JBkhk9kU/qwqUseP1QRJ
+5I1jR4g8aYPL/ke9K35PxZWuDp3U0UPAZ3PjFAh+5T+fc7gzCs9dPzSHloruU+gl
+FQIDAQAB
+-----END PUBLIC KEY-----`,
+			},
+		},
+	}
+
+	rawContent, err := json.Marshal(doc)
+	require.NoError(t, err)
+
+	createDIDReq := &vdr.DIDArgs{
+		Document: vdr.Document{DID: rawContent},
+		Name:     sampleDIDName,
+	}
+	reqBytes, err := json.Marshal(createDIDReq)
+	require.NoError(t, err)
+
+	var getRW bytes.Buffer
+	cmdErr := o.vdrcommand.SaveDID(&getRW, bytes.NewBuffer(reqBytes))
+	require.NoError(t, cmdErr)
+
+	return nil
+}
+
 func getMockDIDKeyVDR() *mockvdr.MockVDRegistry {
 	return &mockvdr.MockVDRegistry{
 		ResolveFunc: func(didID string, opts ...vdrapi.DIDMethodOption) (*did.DocResolution, error) {
@@ -472,16 +788,17 @@ func getMockDIDKeyVDR() *mockvdr.MockVDRegistry {
 	}
 }
 
+// Posible problema: o.currentDID no definido
+// Añadir a este método la funcionalidad de comprobación de solicitud
 func setupMockEnrolmentServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		// Asegurar que la URL es la esperada
 		assert.Equal(t, "/fluidos/idm/acceptEnrolment", req.URL.Path)
 
-		// Generar las fechas dinámicas
 		issuanceDate := time.Now().Format(time.RFC3339Nano)
 		expirationDate := time.Now().AddDate(0, 0, 1).Format(time.RFC3339Nano) // Añadir un día para la fecha de expiración
 
-		// Simular la respuesta de enrolamiento
+		// Simulate the enrollment response
 		response := map[string]interface{}{
 			"credential": map[string]interface{}{
 				"@context": []string{
