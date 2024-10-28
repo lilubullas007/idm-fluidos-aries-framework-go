@@ -122,18 +122,17 @@ func TestNewDID(t *testing.T) {
 	})*/
 }
 
-func TestCommand_SignJWT(t *testing.T) {
+func Test_SignVerifyJWTContent(t *testing.T) {
 	const (
 		sampleUser1 = "sampleUser1"
 		samplePass  = "fakepassphrase"
 		sampleDID   = "did:example:123"
 	)
 
-	// Mock del contexto
 	mockctx := newMockProvider(t)
 	mockctx.VDRegistryValue = getMockDIDKeyVDR()
 
-	// Inicializa el proveedor de criptografía
+	// Initialize cryptographic provider
 	tcrypto, err := tinkcrypto.New()
 	require.NoError(t, err)
 
@@ -155,9 +154,8 @@ func TestCommand_SignJWT(t *testing.T) {
 	require.NoError(t, err)
 
 	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
-	defer lock1()
 
-	t.Run("test SignJWT method - success", func(t *testing.T) {
+	t.Run("test Sign and Verify JWT content - success", func(t *testing.T) {
 		var b bytes.Buffer
 
 		addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
@@ -182,13 +180,130 @@ func TestCommand_SignJWT(t *testing.T) {
 
 		b.Reset()
 
+		// Sign JWT content
+		lock1()
 		command.walletuid = sampleUser1
+		command.walletpass = samplePass
+		command.currentDID = currentDID
+		command.currentKeyPair = keyPairResponse
+		command.currentKeyPair.KeyID = currentKeyID
+
+		content := map[string]interface{}{
+			"name":      "John Doe",
+			"attrName":  "DID",
+			"attrValue": command.currentDID,
+		}
+
+		contentBytes, err := json.Marshal(content)
+		require.NoError(t, err)
+
+		signRequest, err := getReader(SignJWTContentArgs{
+			Content: contentBytes,
+		})
+		require.NoError(t, err)
+
+		var signResponse bytes.Buffer
+		err = command.SignJWTContent(&signResponse, signRequest)
+		require.NoError(t, err)
+
+		// Verify JWT content
+		var jwtSignResponse SignJWTContentResult
+		err = json.Unmarshal(signResponse.Bytes(), &jwtSignResponse)
+		require.NoError(t, err)
+
+		verifyRequest, err := getReader(VerifyJWTContentArgs{
+			JWT: jwtSignResponse.SignedJWTContent,
+		})
+		require.NoError(t, err)
+
+		var verifyResponse bytes.Buffer
+		err = command.VerifyJWTContent(&verifyResponse, verifyRequest)
+		require.NoError(t, err)
+
+		var jwtVerifyResponse vcwallet.VerifyJWTResponse
+		err = json.Unmarshal(verifyResponse.Bytes(), &jwtVerifyResponse)
+		require.NoError(t, err)
+
+		if jwtVerifyResponse.Verified {
+			fmt.Println("JWT content verified")
+		}
+	})
+}
+
+func Test_SignVerifyJWT(t *testing.T) {
+	const (
+		sampleUser1 = "sampleUser1"
+		samplePass  = "fakepassphrase"
+		sampleDID   = "did:example:123"
+	)
+
+	mockctx := newMockProvider(t)
+	mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+	// Initialize cryptographic provider
+	tcrypto, err := tinkcrypto.New()
+	require.NoError(t, err)
+
+	mockctx.CryptoValue = tcrypto
+
+	vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(mockctx)
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Create sample profile
+	err = command.createSampleUserProfile(t, sampleUser1, samplePass)
+	require.NoError(t, err)
+
+	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
+	defer lock1()
+
+	t.Run("test Sign and Verify JWT - success", func(t *testing.T) {
+		var b bytes.Buffer
+
+		addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+			WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
+			KeyType:    kms.ED25519Type,
+		})
+		require.NoError(t, err)
+
+		err = command.vcwalletcommand.CreateKeyPair(&b, addCreateKey)
+		require.NoError(t, err)
+
+		var keyPairResponse vcwallet.CreateKeyPairResponse
+		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
+
+		pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
+		require.NoError(t, err)
+
+		_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
+		parts := strings.Split(didKID, "#")
+		currentDID := parts[0]
+		currentKeyID := parts[1]
+
+		b.Reset()
+
+		// Sign JWT
 		command.currentDID = currentDID
 		command.currentKeyPair = keyPairResponse
 		command.currentKeyPair.KeyID = currentKeyID
 
 		signedJWT := command.signJWT(token)
 		require.NotEmpty(t, signedJWT)
+
+		// Verify JWT
+		isVerified := command.verifyJWT(token, signedJWT)
+		require.NotNil(t, isVerified)
+		require.NotEmpty(t, isVerified)
+		if isVerified {
+			fmt.Println("JWT verified")
+		}
 	})
 }
 
