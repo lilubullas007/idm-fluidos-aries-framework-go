@@ -50,9 +50,16 @@ import (
 	"testing"
 )
 
-const sampleDIDName = "sampleDIDName"
+const (
+	sampleDIDName = "sampleDIDName"
+	sampleCredId  = "http://example.edu/credentials/1872"
+	sampleUser1   = "sampleUser1"
+	samplePass    = "fakepassphrase"
+	sampleDID     = "did:example:123"
+)
 
 func TestNewDID(t *testing.T) {
+	// Success: DID successfully created
 	t.Run("test newDID method - success", func(t *testing.T) {
 		purposeAuth := KeyTypePurpose{Purpose: "Authentication", KeyType: KeyTypeModel{Type: ed25519VerificationKey2018}}
 		purposeAssertion := KeyTypePurpose{Purpose: "AssertionMethod", KeyType: KeyTypeModel{Type: bls12381G1Key2022, Attrs: []string{"2"}}}
@@ -92,7 +99,7 @@ func TestNewDID(t *testing.T) {
 		err = json.NewDecoder(&l).Decode(&response)
 		require.NoError(t, err)
 
-		fmt.Println(response)
+		// fmt.Println(response)
 
 		var didDoc map[string]interface{}
 
@@ -107,6 +114,59 @@ func TestNewDID(t *testing.T) {
 
 		fmt.Println()
 		//require.Equal(t, 5, len(handlers))
+	})
+
+	// Error case: empty keys
+	t.Run("test newDID method - empty keys", func(t *testing.T) {
+		newDIDArgs := NewDIDArgs{Keys: nil, Name: sampleDIDName}
+
+		var l bytes.Buffer
+		reader, err := getReader(newDIDArgs)
+		require.NoError(t, err)
+
+		vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
+		require.NotNil(t, vcwalletCommand)
+
+		vdrCommand, err := vdr.New(&mockprovider.Provider{
+			StorageProviderValue: mockstore.NewMockStoreProvider(),
+			VDRegistryValue:      &mockvdr.MockVDRegistry{},
+		})
+		require.NoError(t, err)
+
+		command, err := New(vdrCommand, vcwalletCommand)
+		require.NoError(t, err)
+
+		err = command.NewDID(&l, reader)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "keys is mandatory")
+	})
+
+	// Error case: invalid key type
+	t.Run("test newDID method - invalid key type", func(t *testing.T) {
+		purposeAuth := KeyTypePurpose{Purpose: "Authentication", KeyType: KeyTypeModel{Type: "invalidKeyType"}}
+		newDIDArgs := NewDIDArgs{Keys: []KeyTypePurpose{purposeAuth}, Name: sampleDIDName}
+
+		var l bytes.Buffer
+		reader, err := getReader(newDIDArgs)
+		require.NoError(t, err)
+
+		vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
+		require.NotNil(t, vcwalletCommand)
+
+		vdrCommand, err := vdr.New(&mockprovider.Provider{
+			StorageProviderValue: mockstore.NewMockStoreProvider(),
+			VDRegistryValue:      &mockvdr.MockVDRegistry{},
+		})
+		require.NoError(t, err)
+
+		command, err := New(vdrCommand, vcwalletCommand)
+		require.NoError(t, err)
+
+		err = command.NewDID(&l, reader)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid key type")
 	})
 
 	/*t.Run("test new command - did store error", func(t *testing.T) {
@@ -158,13 +218,13 @@ func Test_SignVerifyJWTContent(t *testing.T) {
 	t.Run("test Sign and Verify JWT content - success", func(t *testing.T) {
 		var b bytes.Buffer
 
-		addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+		reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
 			WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
 			KeyType:    kms.ED25519Type,
 		})
 		require.NoError(t, err)
 
-		err = command.vcwalletcommand.CreateKeyPair(&b, addCreateKey)
+		err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
 		require.NoError(t, err)
 
 		var keyPairResponse vcwallet.CreateKeyPairResponse
@@ -231,12 +291,6 @@ func Test_SignVerifyJWTContent(t *testing.T) {
 }
 
 func Test_SignVerifyJWT(t *testing.T) {
-	const (
-		sampleUser1 = "sampleUser1"
-		samplePass  = "fakepassphrase"
-		sampleDID   = "did:example:123"
-	)
-
 	mockctx := newMockProvider(t)
 	mockctx.VDRegistryValue = getMockDIDKeyVDR()
 
@@ -264,47 +318,76 @@ func Test_SignVerifyJWT(t *testing.T) {
 	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
 	defer lock1()
 
+	var b bytes.Buffer
+
+	addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+		WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
+		KeyType:    kms.ED25519Type,
+	})
+	require.NoError(t, err)
+
+	err = command.vcwalletcommand.CreateKeyPair(&b, addCreateKey)
+	require.NoError(t, err)
+
+	var keyPairResponse vcwallet.CreateKeyPairResponse
+	require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
+
+	pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
+	require.NoError(t, err)
+
+	_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
+	parts := strings.Split(didKID, "#")
+	currentDID := parts[0]
+	currentKeyID := parts[1]
+
+	b.Reset()
+
+	command.currentDID = currentDID
+	command.currentKeyPair = keyPairResponse
+	command.currentKeyPair.KeyID = currentKeyID
+
+	// Success: JWT successfully signed and verified
 	t.Run("test Sign and Verify JWT - success", func(t *testing.T) {
-		var b bytes.Buffer
-
-		addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
-			WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
-			KeyType:    kms.ED25519Type,
-		})
-		require.NoError(t, err)
-
-		err = command.vcwalletcommand.CreateKeyPair(&b, addCreateKey)
-		require.NoError(t, err)
-
-		var keyPairResponse vcwallet.CreateKeyPairResponse
-		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
-
-		pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
-		require.NoError(t, err)
-
-		_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
-		parts := strings.Split(didKID, "#")
-		currentDID := parts[0]
-		currentKeyID := parts[1]
-
-		b.Reset()
-
 		// Sign JWT
-		command.currentDID = currentDID
-		command.currentKeyPair = keyPairResponse
-		command.currentKeyPair.KeyID = currentKeyID
-
 		signedJWT := command.signJWT(token)
 		require.NotEmpty(t, signedJWT)
 
 		// Verify JWT
 		isVerified := command.verifyJWT(token, signedJWT)
 		require.NotNil(t, isVerified)
-		require.NotEmpty(t, isVerified)
-		if isVerified {
-			fmt.Println("JWT verified")
-		}
+		require.True(t, isVerified)
+		fmt.Println("JWT verified")
 	})
+
+	// Error case: invalid token
+	t.Run("test Sign JWT - invalid token", func(t *testing.T) {
+		invalidToken := "invalidToken"
+		signedJWT := command.signJWT(invalidToken)
+
+		require.Empty(t, signedJWT, "JWT should be empty for invalid token")
+	})
+
+	// Error case: verification failure
+	t.Run("test Verify JWT - verification failure", func(t *testing.T) {
+		invalidJWT := "invalidJWT"
+		isVerified := command.verifyJWT(token, invalidJWT)
+
+		require.False(t, isVerified)
+	})
+
+	// Error case: tampered JWT
+	t.Run("test Verify JWT - tampered JWT", func(t *testing.T) {
+		// Sign with a valid token
+		signedJWT := command.signJWT(token)
+		require.NotEmpty(t, signedJWT)
+
+		// Create an incorrect (manipulated) JWT
+		tamperedJWT := signedJWT + "tamper"
+
+		isVerified := command.verifyJWT(token, tamperedJWT)
+		require.False(t, isVerified, "JWT verification should fail for tampered JWT")
+	})
+
 }
 
 func TestDoDeviceEnrolment(t *testing.T) {
@@ -386,13 +469,8 @@ func TestDoDeviceEnrolment(t *testing.T) {
 }
 
 func TestGetVCredential(t *testing.T) {
+	// Success: VCredential successfully obtained
 	t.Run("test GetVCredential method - success", func(t *testing.T) {
-		const (
-			sampleUser1    = "sampleUser1"
-			sampleCredId   = "http://example.edu/credentials/1872"
-			fakePassphrase = "fakepassphrase"
-		)
-
 		fmt.Printf("ID of the sought credential: %s\n", sampleCredId)
 
 		// Define valid argument for GetVCredential
@@ -431,15 +509,20 @@ func TestGetVCredential(t *testing.T) {
 		}
 
 		// Create sample profile
-		err = command.createSampleUserProfile(t, sampleUser1, fakePassphrase)
+		err = command.createSampleUserProfile(t, sampleUser1, samplePass)
 		require.NoError(t, err)
 
-		token1, lock1 := command.unlockWallet(t, sampleUser1, fakePassphrase)
-		defer lock1()
+		token1, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
+		// defer lock1()
 
 		// Add credential to wallet
 		err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, vc2, "")
 		require.NoError(t, err)
+
+		// Pruebas (PREGUNTAR DUDA)
+		command.walletuid = sampleUser1
+		command.walletpass = samplePass
+		lock1()
 
 		// GetVCredential method
 		err = command.GetVCredential(&l, reader)
