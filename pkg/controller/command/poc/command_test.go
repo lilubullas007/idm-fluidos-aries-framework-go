@@ -59,6 +59,7 @@ const (
 )
 
 func TestNewDID(t *testing.T) {
+
 	// Success: DID successfully created
 	t.Run("test newDID method - success", func(t *testing.T) {
 		purposeAuth := KeyTypePurpose{Purpose: "Authentication", KeyType: KeyTypeModel{Type: ed25519VerificationKey2018}}
@@ -83,12 +84,9 @@ func TestNewDID(t *testing.T) {
 		require.NotNil(t, vdrCommand)
 		require.NoError(t, err)
 
-		// fmt.Printf("VDR Command: %+v\n", vdrCommand)
 		command, err := New(vdrCommand, vcwalletCommand)
 		require.NoError(t, err)
 
-		// fmt.Printf("Reader: %+v\n", reader)
-		// fmt.Printf("Command: %+v\n", command)
 		err = command.NewDID(&l, reader)
 
 		require.NoError(t, err)
@@ -183,11 +181,6 @@ func TestNewDID(t *testing.T) {
 }
 
 func Test_SignVerifyJWTContent(t *testing.T) {
-	const (
-		sampleUser1 = "sampleUser1"
-		samplePass  = "fakepassphrase"
-		sampleDID   = "did:example:123"
-	)
 
 	mockctx := newMockProvider(t)
 	mockctx.VDRegistryValue = getMockDIDKeyVDR()
@@ -209,51 +202,45 @@ func Test_SignVerifyJWTContent(t *testing.T) {
 	command, err := New(vdrCommand, vcwalletCommand)
 	require.NoError(t, err)
 
-	// Create sample profile
-	err = command.createSampleUserProfile(t, sampleUser1, samplePass)
+	token, lock1 := command.unlockWallet(t, command.walletuid, command.walletpass)
+
+	var b bytes.Buffer
+
+	reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+		WalletAuth: vcwallet.WalletAuth{UserID: command.walletuid, Auth: token},
+		KeyType:    kms.ED25519Type,
+	})
 	require.NoError(t, err)
 
-	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
+	err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
+	require.NoError(t, err)
 
+	var keyPairResponse vcwallet.CreateKeyPairResponse
+	require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
+
+	pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
+	require.NoError(t, err)
+
+	_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
+	parts := strings.Split(didKID, "#")
+	currentDID := parts[0]
+	currentKeyID := parts[1]
+
+	b.Reset()
+	lock1()
+
+	command.currentDID = currentDID
+	command.currentKeyPair = keyPairResponse
+	command.currentKeyPair.KeyID = currentKeyID
+
+	content := map[string]interface{}{
+		"name":      "John Doe",
+		"attrName":  "DID",
+		"attrValue": command.currentDID,
+	}
+
+	// Success: JWT content successfully signed and verified
 	t.Run("test Sign and Verify JWT content - success", func(t *testing.T) {
-		var b bytes.Buffer
-
-		reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
-			WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
-			KeyType:    kms.ED25519Type,
-		})
-		require.NoError(t, err)
-
-		err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
-		require.NoError(t, err)
-
-		var keyPairResponse vcwallet.CreateKeyPairResponse
-		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
-
-		pubKey, err := base64.RawURLEncoding.DecodeString(keyPairResponse.PublicKey)
-		require.NoError(t, err)
-
-		_, didKID := fingerprint.CreateDIDKeyByCode(fingerprint.ED25519PubKeyMultiCodec, pubKey)
-		parts := strings.Split(didKID, "#")
-		currentDID := parts[0]
-		currentKeyID := parts[1]
-
-		b.Reset()
-
-		// Sign JWT content
-		lock1()
-		command.walletuid = sampleUser1
-		command.walletpass = samplePass
-		command.currentDID = currentDID
-		command.currentKeyPair = keyPairResponse
-		command.currentKeyPair.KeyID = currentKeyID
-
-		content := map[string]interface{}{
-			"name":      "John Doe",
-			"attrName":  "DID",
-			"attrValue": command.currentDID,
-		}
-
 		contentBytes, err := json.Marshal(content)
 		require.NoError(t, err)
 
@@ -288,9 +275,83 @@ func Test_SignVerifyJWTContent(t *testing.T) {
 			fmt.Println("JWT content verified")
 		}
 	})
+
+	// Error case: invalid wallet token
+	t.Run("test SignJWTContent - invalid wallet token", func(t *testing.T) {
+		invalidToken := "incorrect-token"
+		reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+			WalletAuth: vcwallet.WalletAuth{UserID: command.walletuid, Auth: invalidToken},
+			KeyType:    kms.ED25519Type,
+		})
+		require.NoError(t, err)
+
+		var b bytes.Buffer
+		err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "invalid auth token")
+	})
+
+	// Error case: malformed JWT
+	t.Run("test VerifyJWTContent - malformed JWT", func(t *testing.T) {
+		malformedJWT := "not-a-jwt-token"
+		verifyRequest, err := getReader(VerifyJWTContentArgs{
+			JWT: malformedJWT,
+		})
+		require.NoError(t, err)
+
+		var verifyResponse bytes.Buffer
+		err = command.VerifyJWTContent(&verifyResponse, verifyRequest)
+
+		var jwtVerifyResponse vcwallet.VerifyJWTResponse
+		err = json.Unmarshal(verifyResponse.Bytes(), &jwtVerifyResponse)
+		require.NoError(t, err)
+
+		require.False(t, jwtVerifyResponse.Verified)
+		require.Contains(t, jwtVerifyResponse.Error, "jwt verification failed: JWT of compacted JWS form is supported only")
+	})
+
+	// Error case: tampered JWT
+	t.Run("test VerifyJWTContent - tampered JWT", func(t *testing.T) {
+		contentBytes, err := json.Marshal(content)
+		require.NoError(t, err)
+
+		var signResponse bytes.Buffer
+		signRequest, err := getReader(SignJWTContentArgs{
+			Content: contentBytes,
+		})
+		require.NoError(t, err)
+
+		err = command.SignJWTContent(&signResponse, signRequest)
+		require.NoError(t, err)
+
+		var jwtSignResponse SignJWTContentResult
+		err = json.Unmarshal(signResponse.Bytes(), &jwtSignResponse)
+		require.NoError(t, err)
+
+		// Manipulate signed JWT
+		tamperedJWT := jwtSignResponse.SignedJWTContent + "tamper"
+
+		verifyRequest, err := getReader(VerifyJWTContentArgs{
+			JWT: tamperedJWT,
+		})
+		require.NoError(t, err)
+
+		var verifyResponse bytes.Buffer
+		err = command.VerifyJWTContent(&verifyResponse, verifyRequest)
+
+		var jwtVerifyResponse vcwallet.VerifyJWTResponse
+		err = json.Unmarshal(verifyResponse.Bytes(), &jwtVerifyResponse)
+		require.NoError(t, err)
+
+		require.False(t, jwtVerifyResponse.Verified)
+		require.Contains(t, jwtVerifyResponse.Error, "jwt verification failed")
+	})
+
 }
 
 func Test_SignVerifyJWT(t *testing.T) {
+
 	mockctx := newMockProvider(t)
 	mockctx.VDRegistryValue = getMockDIDKeyVDR()
 
@@ -311,17 +372,13 @@ func Test_SignVerifyJWT(t *testing.T) {
 	command, err := New(vdrCommand, vcwalletCommand)
 	require.NoError(t, err)
 
-	// Create sample profile
-	err = command.createSampleUserProfile(t, sampleUser1, samplePass)
-	require.NoError(t, err)
-
-	token, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
+	token, lock1 := command.unlockWallet(t, command.walletuid, command.walletpass)
 	defer lock1()
 
 	var b bytes.Buffer
 
 	addCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
-		WalletAuth: vcwallet.WalletAuth{UserID: sampleUser1, Auth: token},
+		WalletAuth: vcwallet.WalletAuth{UserID: command.walletuid, Auth: token},
 		KeyType:    kms.ED25519Type,
 	})
 	require.NoError(t, err)
@@ -469,6 +526,22 @@ func TestDoDeviceEnrolment(t *testing.T) {
 }
 
 func TestGetVCredential(t *testing.T) {
+
+	// Mocks (vcwallet and vdr)
+	vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(&mockprovider.Provider{
+		StorageProviderValue: mockstore.NewMockStoreProvider(),
+		VDRegistryValue:      &mockvdr.MockVDRegistry{}, // Mock VDRegistry
+	})
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// New command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
 	// Success: VCredential successfully obtained
 	t.Run("test GetVCredential method - success", func(t *testing.T) {
 		fmt.Printf("ID of the sought credential: %s\n", sampleCredId)
@@ -478,22 +551,6 @@ func TestGetVCredential(t *testing.T) {
 		var l bytes.Buffer
 		reader, err := getReader(getVCredentialArgs)
 		require.NotNil(t, reader)
-		require.NoError(t, err)
-
-		// Mocks (vcwallet and vdr)
-		vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
-		require.NotNil(t, vcwalletCommand)
-		require.NoError(t, err)
-
-		vdrCommand, err := vdr.New(&mockprovider.Provider{
-			StorageProviderValue: mockstore.NewMockStoreProvider(),
-			VDRegistryValue:      &mockvdr.MockVDRegistry{}, // Mock VDRegistry
-		})
-		require.NotNil(t, vdrCommand)
-		require.NoError(t, err)
-
-		// New command instance
-		command, err := New(vdrCommand, vcwalletCommand)
 		require.NoError(t, err)
 
 		// Sample VC
@@ -508,20 +565,12 @@ func TestGetVCredential(t *testing.T) {
 			},
 		}
 
-		// Create sample profile
-		err = command.createSampleUserProfile(t, sampleUser1, samplePass)
-		require.NoError(t, err)
-
-		token1, lock1 := command.unlockWallet(t, sampleUser1, samplePass)
-		// defer lock1()
+		token1, lock1 := command.unlockWallet(t, command.walletuid, command.walletpass)
 
 		// Add credential to wallet
-		err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, vc2, "")
+		err = command.AddCredentialToWallet(command.walletuid, token1, wallet.Credential, vc2, "")
 		require.NoError(t, err)
 
-		// Pruebas (PREGUNTAR DUDA)
-		command.walletuid = sampleUser1
-		command.walletpass = samplePass
 		lock1()
 
 		// GetVCredential method
@@ -551,13 +600,51 @@ func TestGetVCredential(t *testing.T) {
 
 		fmt.Println()
 	})
+
+	// Error case: malformed JSON request
+	t.Run("test GetVCredential - malformed JSON request", func(t *testing.T) {
+		malformedJSON := strings.NewReader("{CredId:}")
+
+		var l bytes.Buffer
+		err := command.GetVCredential(&l, malformedJSON)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "request decode")
+	})
+
+	// Error case: credential not found
+	t.Run("test GetVCredential - credential not found", func(t *testing.T) {
+		missingCredId := "http://example.edu/credentials/9999"
+		getVCredentialArgs := GetVCredentialArgs{CredId: missingCredId}
+		reader, err := getReader(getVCredentialArgs)
+		require.NoError(t, err)
+
+		var l bytes.Buffer
+		err = command.GetVCredential(&l, reader)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "data not found")
+	})
+
+	// Error case: invalid wallet credentials
+	t.Run("test GetVCredential - invalid wallet credentials", func(t *testing.T) {
+		command.walletuid = "invalidUserID"
+		command.walletpass = "invalidPassphrase"
+
+		var l bytes.Buffer
+		getVCredentialArgs := GetVCredentialArgs{CredId: sampleCredId}
+		reader, err := getReader(getVCredentialArgs)
+		require.NotNil(t, reader)
+		require.NoError(t, err)
+		err = command.GetVCredential(&l, reader)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "profile does not exist")
+	})
+
 }
 
 func TestGenerateVP(t *testing.T) {
-	const (
-		sampleUser1    = "sampleUser1"
-		fakePassphrase = "fakepassphrase"
-	)
 
 	// Simulated provider
 	mockctx := newMockProvider(t)
@@ -574,12 +661,7 @@ func TestGenerateVP(t *testing.T) {
 	command, err := New(vdrCommand, vcwalletCommand)
 	require.NoError(t, err)
 
-	// Create sample profile
-	err = command.createSampleUserProfile(t, sampleUser1, fakePassphrase)
-	require.NoError(t, err)
-
-	token1, lock1 := command.unlockWallet(t, sampleUser1, fakePassphrase)
-	defer lock1()
+	token1, lock1 := command.unlockWallet(t, command.walletuid, command.walletpass)
 
 	// Add sample credential to wallet
 	var sampleNewUDCVc map[string]interface{}
@@ -589,7 +671,7 @@ func TestGenerateVP(t *testing.T) {
 	sampleNewUDCVc["id"] = "http://example.edu/credentials/18722"
 
 	// Add credential to wallet
-	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVc, "")
+	err = command.AddCredentialToWallet(command.walletuid, token1, wallet.Credential, sampleNewUDCVc, "")
 	require.NoError(t, err)
 
 	// sampleUDCVCWithProofBBS includes a proof object, which is essential for credential
@@ -599,19 +681,21 @@ func TestGenerateVP(t *testing.T) {
 	err = json.Unmarshal(testdata.SampleUDCVCWithProofBBS, &sampleNewUDCVProofBBS)
 	require.NoError(t, err)
 
-	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
+	err = command.AddCredentialToWallet(command.walletuid, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
 	require.NoError(t, err)
 
-	t.Run("successfully generate verifiable presentation", func(t *testing.T) {
-		var queryByFrame QueryByFrame
-		err := json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
-		require.NoError(t, err)
+	lock1()
 
+	var queryByFrame QueryByFrame
+	err = json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
+	require.NoError(t, err)
+
+	// Success: VP successfully generated
+	t.Run("test Generate VP - success", func(t *testing.T) {
 		request := &GenerateVPArgs{
 			CredId:       "http://example.edu/credentials/18722",
 			QueryByFrame: queryByFrame,
 		}
-
 		reqBody, err := json.Marshal(request)
 		require.NoError(t, err)
 
@@ -626,6 +710,58 @@ func TestGenerateVP(t *testing.T) {
 
 		t.Log("Prueba de generación de VP exitosa con resultado:", response.Results)
 	})
+
+	// Error case: non-existent credential ID
+	t.Run("test GenerateVP - non-existent credential ID", func(t *testing.T) {
+		request := &GenerateVPArgs{
+			CredId:       "http://example.edu/credentials/unknownID",
+			QueryByFrame: queryByFrame,
+		}
+
+		reqBody, err := json.Marshal(request)
+		require.NoError(t, err)
+
+		var b bytes.Buffer
+		cmdErr := command.GenerateVP(&b, bytes.NewReader(reqBody))
+
+		require.Error(t, cmdErr)
+		require.Contains(t, cmdErr.Error(), "data not found")
+	})
+
+	// Error case: empty QueryByFrame
+	t.Run("test GenerateVP - empty QueryByFrame", func(t *testing.T) {
+		request := &GenerateVPArgs{
+			CredId:       "http://example.edu/credentials/18722",
+			QueryByFrame: QueryByFrame{},
+		}
+
+		reqBody, err := json.Marshal(request)
+		require.NoError(t, err)
+
+		var b bytes.Buffer
+		cmdErr := command.GenerateVP(&b, bytes.NewReader(reqBody))
+
+		require.Error(t, cmdErr)
+		require.Contains(t, cmdErr.Error(), "query response not working")
+	})
+
+	// Error case: missing CredId in request
+	t.Run("test GenerateVP - missing CredId in request", func(t *testing.T) {
+		request := &GenerateVPArgs{
+			CredId:       "",
+			QueryByFrame: queryByFrame,
+		}
+
+		reqBody, err := json.Marshal(request)
+		require.NoError(t, err)
+
+		var b bytes.Buffer
+		cmdErr := command.GenerateVP(&b, bytes.NewReader(reqBody))
+
+		require.Error(t, cmdErr)
+		require.Contains(t, cmdErr.Error(), "data not found")
+	})
+
 }
 
 func TestVerifyCredential(t *testing.T) {
