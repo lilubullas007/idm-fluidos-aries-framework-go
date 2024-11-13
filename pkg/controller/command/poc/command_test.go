@@ -56,6 +56,7 @@ const (
 	sampleUser1   = "sampleUser1"
 	samplePass    = "fakepassphrase"
 	sampleDID     = "did:example:123"
+	sampleURL     = "http://issuer:9082"
 )
 
 func TestNewDID(t *testing.T) {
@@ -448,74 +449,66 @@ func Test_SignVerifyJWT(t *testing.T) {
 }
 
 func TestDoDeviceEnrolment(t *testing.T) {
+	// DoDeviceEnrolment sample args
+	enrolmentArgs := DoDeviceEnrolmentArgs{
+		Url: sampleURL,
+		IdProofs: []IdProof{
+			{AttrName: "holderName", AttrValue: "FluidosNode"},
+			{AttrName: "fluidosRole", AttrValue: "Customer"},
+			{AttrName: "deviceType", AttrValue: "Server"},
+			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
+			{AttrName: "physicalAddress", AttrValue: "50:80:61:82:ab:c9"},
+		},
+	}
+
+	// mockServer to capture the http request (inside DoDeviceEnrolment) to AcceptEnrolment
+	mockServer := setupMockEnrolmentServer(t)
+	defer mockServer.Close()
+	enrolmentArgs.Url = mockServer.URL
+
+	var requestBody bytes.Buffer
+	err := json.NewEncoder(&requestBody).Encode(enrolmentArgs)
+	require.NoError(t, err)
+
+	vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+	require.NoError(t, err)
+
+	vdrCommand, err := vdr.New(&mockprovider.Provider{
+		StorageProviderValue: mockstore.NewMockStoreProvider(),
+		VDRegistryValue:      &mockvdr.MockVDRegistry{}, // Mock de VDRegistry
+	})
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Sample DID
+	command.currentDID = "did:fabric:DuYKXxLuWnTQzBaa9p1eT1Aya98nirASjVN8dphJjYw"
+
+	var l bytes.Buffer
+
+	// Success: DoDeviceEnrolment
 	t.Run("test DoDeviceEnrolment method - success", func(t *testing.T) {
-		const (
-			sampleUser1 = "sampleUser1"
-			samplePass  = "fakepassphrase"
-			sampleDID   = "did:example:123"
-			sampleURL   = "https://issuer:9082"
-		)
-
-		// Argumentos de prueba para DoDeviceEnrolment
-		enrolmentArgs := DoDeviceEnrolmentArgs{
-			Url: sampleURL,
-			IdProofs: []IdProof{
-				{AttrName: "holderName", AttrValue: "FluidosNode"},
-				{AttrName: "fluidosRole", AttrValue: "Customer"},
-				{AttrName: "deviceType", AttrValue: "Server"},
-				{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
-				{AttrName: "physicalAddress", AttrValue: "50:80:61:82:ab:c9"},
-			},
-		}
-
-		mockServer := setupMockEnrolmentServer(t)
-		defer mockServer.Close()
-		enrolmentArgs.Url = mockServer.URL
-
-		// Serializar el request para simular entrada válida
-		var requestBody bytes.Buffer
-		err := json.NewEncoder(&requestBody).Encode(enrolmentArgs)
-		require.NoError(t, err)
-
-		// Crear mocks
-		vcwalletCommand := vcwallet.New(newMockProvider(t), &vcwallet.Config{})
-		require.NotNil(t, vcwalletCommand)
-		require.NoError(t, err)
-
-		vdrCommand, err := vdr.New(&mockprovider.Provider{
-			StorageProviderValue: mockstore.NewMockStoreProvider(),
-			VDRegistryValue:      &mockvdr.MockVDRegistry{}, // Mock de VDRegistry
-		})
-		require.NoError(t, err)
-
-		// Crear nueva instancia de Command
-		command, err := New(vdrCommand, vcwalletCommand)
-		require.NoError(t, err)
-
-		// Crear writer para capturar la salida
-		var l bytes.Buffer
-
-		// Ejecutar DoDeviceEnrolment
+		// DoDeviceEnrolment method
 		err = command.DoDeviceEnrolment(&l, &requestBody)
 		require.NoError(t, err)
 
-		// Validar la respuesta decodificada
 		var response DoDeviceEnrolmentResult
 		err = json.NewDecoder(&l).Decode(&response)
 		require.NoError(t, err)
 		require.NotNil(t, response)
 
-		// Imprimir la credencial obtenida
+		// Print obtained credential
 		fmt.Println("Credential storage ID:", response.CredStorageId)
-		fmt.Println("Credential:", string(response.Credential))
+		// fmt.Println("Credential:", string(response.Credential))
 
 		var cred map[string]interface{}
 
-		// Decodificar contenido de la credencial
 		err = json.Unmarshal(response.Credential, &cred)
 		require.NoError(t, err)
 
-		// Mostrar el resultado en formato legible
 		prettyCred, err := json.MarshalIndent(cred, "", "  ")
 		require.NoError(t, err)
 
@@ -523,6 +516,51 @@ func TestDoDeviceEnrolment(t *testing.T) {
 
 		fmt.Println()
 	})
+
+	// Error case: malformed JSON request
+	t.Run("test DoDeviceEnrolment - malformed JSON request", func(t *testing.T) {
+		malformedJSON := strings.NewReader(`{"Url": "sampleURL", "IdProofs": [{{}]}`)
+
+		err = command.DoDeviceEnrolment(&l, malformedJSON)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "request decode")
+	})
+
+	// Error case: missing URL
+	t.Run("test DoDeviceEnrolment - missing URL", func(t *testing.T) {
+		enrolmentArgs := DoDeviceEnrolmentArgs{
+			IdProofs: []IdProof{
+				{AttrName: "holderName", AttrValue: "FluidosNode"},
+			},
+		}
+
+		var requestBody bytes.Buffer
+		err := json.NewEncoder(&requestBody).Encode(enrolmentArgs)
+		require.NoError(t, err)
+
+		var l bytes.Buffer
+		err = command.DoDeviceEnrolment(&l, &requestBody)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "url is mandatory")
+	})
+
+	// Error: missing IdProofs
+	t.Run("test DoDeviceEnrolment - missing IdProofs", func(t *testing.T) {
+		enrolmentArgs := DoDeviceEnrolmentArgs{Url: sampleURL}
+
+		var requestBody bytes.Buffer
+		err := json.NewEncoder(&requestBody).Encode(enrolmentArgs)
+		require.NoError(t, err)
+
+		var l bytes.Buffer
+		err = command.DoDeviceEnrolment(&l, &requestBody)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "idProofs is mandatory")
+	})
+
 }
 
 func TestGetVCredential(t *testing.T) {
@@ -765,10 +803,6 @@ func TestGenerateVP(t *testing.T) {
 }
 
 func TestVerifyCredential(t *testing.T) {
-	const (
-		sampleUser1    = "sampleUser1"
-		fakePassphrase = "fakepassphrase"
-	)
 
 	// Simulated provider
 	mockctx := newMockProvider(t)
@@ -785,12 +819,7 @@ func TestVerifyCredential(t *testing.T) {
 	command, err := New(vdrCommand, vcwalletCommand)
 	require.NoError(t, err)
 
-	// Create sample profile
-	err = command.createSampleUserProfile(t, sampleUser1, fakePassphrase)
-	require.NoError(t, err)
-
-	token1, lock1 := command.unlockWallet(t, sampleUser1, fakePassphrase)
-	defer lock1()
+	token1, lock1 := command.unlockWallet(t, command.walletuid, command.walletpass)
 
 	// Add sample credential to wallet
 	var sampleNewUDCVc map[string]interface{}
@@ -800,7 +829,7 @@ func TestVerifyCredential(t *testing.T) {
 	sampleNewUDCVc["id"] = "http://example.edu/credentials/18722"
 
 	// Add credential to wallet
-	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVc, "")
+	err = command.AddCredentialToWallet(command.walletuid, token1, wallet.Credential, sampleNewUDCVc, "")
 	require.NoError(t, err)
 
 	// sampleUDCVCWithProofBBS includes a proof object, which is essential for credential
@@ -810,13 +839,16 @@ func TestVerifyCredential(t *testing.T) {
 	err = json.Unmarshal(testdata.SampleUDCVCWithProofBBS, &sampleNewUDCVProofBBS)
 	require.NoError(t, err)
 
-	err = command.AddCredentialToWallet(sampleUser1, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
+	err = command.AddCredentialToWallet(command.walletuid, token1, wallet.Credential, sampleNewUDCVProofBBS, "")
 	require.NoError(t, err)
 
-	t.Run("successfully issue VP and verify it", func(t *testing.T) {
+	lock1()
+
+	// Success: VP successfully issued and verified
+	t.Run("test VerifyCredential - success", func(t *testing.T) {
 		// Part I: Issue VP
 		var queryByFrame QueryByFrame
-		err := json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
+		err = json.Unmarshal(testdata.SampleWalletQueryByFrame, &queryByFrame)
 		require.NoError(t, err)
 
 		request := &GenerateVPArgs{
@@ -855,34 +887,40 @@ func TestVerifyCredential(t *testing.T) {
 		// Print result
 		fmt.Printf("Credential verification result: %v\n", response.Result)
 	})
+
+	// Error case: malformed JSON request
+	t.Run("test VerifyCredential - malformed JSON request", func(t *testing.T) {
+		malformedJSON := strings.NewReader("{CredentialString:}")
+
+		var l bytes.Buffer
+		err := command.VerifyCredential(&l, malformedJSON)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "request decode")
+	})
+
+	// Error case: invalid credential format
+	t.Run("test VerifyCredential - invalid credential format", func(t *testing.T) {
+		invalidCredential := map[string]interface{}{
+			"id":       "http://example.edu/credentials/invalid",
+			"@context": "https://www.w3.org/2018/credentials/v1",
+		}
+
+		var l bytes.Buffer
+		credBytes, err := json.Marshal(invalidCredential)
+		require.NoError(t, err)
+
+		reader := bytes.NewReader(credBytes)
+		err = command.VerifyCredential(&l, reader)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get Verify Request reader")
+	})
+
 }
 
 /**
 func TestAcceptEnrolment(t *testing.T) {
 	t.Run("test AcceptEnrolment method - success", func(t *testing.T) {
-		const (
-			sampleUser     = "sampleUser1"
-			fakePassphrase = "fakepassphrase"
-			sampleDID      = "did:peer:21tDAKCERh95uGgKbJNHYp"
-		)
-
-		// idProofs definition
-		idProofs := []IdProof{
-			{AttrName: "holderName", AttrValue: "FluidosNode"},
-			{AttrName: "fluidosRole", AttrValue: "Customer"},
-			{AttrName: "deviceType", AttrValue: "Server"},
-			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
-			{AttrName: "DID", AttrValue: sampleDID},
-		}
-
-		// AcceptEnrolment arguments
-		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: idProofs}
-
-		var l bytes.Buffer
-		reader, err := getReader(acceptEnrolmentArgs)
-		require.NotNil(t, reader)
-		require.NoError(t, err)
-
 		// Simulated provider
 		mockctx := newMockProvider(t)
 		mockctx.VDRegistryValue = getMockDIDKeyVDR()
@@ -898,54 +936,82 @@ func TestAcceptEnrolment(t *testing.T) {
 		command, err := New(vdrCommand, vcwalletCommand)
 		require.NoError(t, err)
 
-		// Create sample profile
-		err = command.createSampleUserProfile(t, sampleUser, fakePassphrase)
+		// Generate new DID
+		purposeAuth := KeyTypePurpose{Purpose: "Authentication", KeyType: KeyTypeModel{Type: ed25519VerificationKey2018}}
+		purposeAssertion := KeyTypePurpose{Purpose: "AssertionMethod", KeyType: KeyTypeModel{Type: bls12381G1Key2022, Attrs: []string{"2"}}}
+
+		newDIDArgs := NewDIDArgs{Keys: []KeyTypePurpose{purposeAuth, purposeAssertion}, Name: sampleDIDName}
+
+		var l bytes.Buffer
+		reader, err := getReader(newDIDArgs)
+
+		require.NotNil(t, reader)
 		require.NoError(t, err)
 
-		token, lock := command.unlockWallet(t, sampleUser, fakePassphrase)
-		defer lock()
+		err = command.NewDID(&l, reader)
 
-		// Agregar credencial a la billetera
-		baseCred := map[string]interface{}{
-			"@context": []string{"https://www.w3.org/2018/credentials/v1"},
-			"id":       "http://example.edu/credentials/123",
-			"type":     []string{"VerifiableCredential"},
-			"issuer": map[string]interface{}{
-				"id": "did:peer:21tDAKCERh95uGgKbJNHYp",
-			},
-			"issuanceDate": "2024-10-23T00:00:00Z",
-			"credentialSubject": map[string]interface{}{
-				"id":     "did:peer:21tDAKCERh95uGgKbJNHYp",
-				"name":   "John Doe",
-				"degree": "Bachelor of Science",
-				"year":   2024,
-			},
+		require.NoError(t, err)
+		require.NotNil(t, command)
+
+		var response NewDIDResult
+
+		err = json.NewDecoder(&l).Decode(&response)
+		require.NoError(t, err)
+
+		// idProofs definition
+		idProofs := []IdProof{
+			{AttrName: "holderName", AttrValue: "FluidosNode"},
+			{AttrName: "fluidosRole", AttrValue: "Customer"},
+			{AttrName: "deviceType", AttrValue: "Server"},
+			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
+			{AttrName: "DID", AttrValue: command.currentDID},
 		}
 
-		// Define currentDID
-		command.currentDID = sampleDID
+		// AcceptEnrolment arguments
+		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: idProofs}
 
-		// Add DID To VDR
-		command.AddDIDToVDR(t)
-
-		// Asegúrate de que el método que usas para agregar a la billetera espera datos en el formato correcto
-		err = command.AddCredentialToWallet(sampleUser, token, wallet.Credential, baseCred, "")
+		reader, err = getReader(acceptEnrolmentArgs)
+		require.NotNil(t, reader)
 		require.NoError(t, err)
+
+		token, lock := command.unlockWallet(t, command.walletuid, command.walletpass)
+
+		// Add correct content to wallet
+		var sampleWalletKey map[string]interface{}
+		err = json.Unmarshal(testdata.SampleWalletContentKeyBase58, &sampleWalletKey)
+		require.NoError(t, err)
+
+		err = command.AddCredentialToWallet(command.walletuid, token, wallet.Key, sampleWalletKey, "")
+		require.NoError(t, err)
+
+		var sampleDocRes map[string]interface{}
+		err = json.Unmarshal(testdata.SampleDocResolutionResponse, &sampleDocRes)
+		require.NoError(t, err)
+
+		err = command.AddCredentialToWallet(command.walletuid, token, wallet.DIDResolutionResponse, sampleDocRes, "")
+		require.NoError(t, err)
+		// command.currentDID = "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5"
+
+		lock()
+
+		// fmt.Println(string(testdata.SampleWalletContentKeyBase58))
+		// fmt.Println("---")
+		// fmt.Println(string(testdata.SampleDocResolutionResponse))
 
 		// Llamar al método AcceptEnrolment
 		err = command.AcceptEnrolment(&l, reader)
 		require.NoError(t, err)
 
 		// Verificar el resultado
-		var response AcceptEnrolmentResult
-		err = json.NewDecoder(&l).Decode(&response)
+		var response2 AcceptEnrolmentResult
+		err = json.NewDecoder(&l).Decode(&response2)
 		require.NoError(t, err)
 
 		require.NotNil(t, response)
 
 		// Imprimir el resultado de la credencial emitida
 		var didDoc map[string]interface{}
-		err = json.Unmarshal(response.Credential, &didDoc)
+		err = json.Unmarshal(response2.Credential, &didDoc)
 		require.NoError(t, err)
 
 		prettyDidDoc, err := json.MarshalIndent(didDoc, "", "  ")
@@ -1008,21 +1074,6 @@ func (o *Command) unlockWallet(t *testing.T, sampleUser string, localKMS string)
 			t.Log(t, cmdErr)
 		}
 	}
-}
-
-func (o *Command) createSampleUserProfile(t *testing.T, sampleUser string, localKMS string) error {
-	var l bytes.Buffer
-
-	createReader, err := getReader(&vcwallet.CreateOrUpdateProfileRequest{
-		UserID:             sampleUser,
-		LocalKMSPassphrase: localKMS,
-	})
-	require.NoError(t, err)
-
-	cmdErr := o.vcwalletcommand.CreateProfile(&l, createReader)
-	require.NoError(t, cmdErr)
-
-	return nil
 }
 
 func (o *Command) AddCredentialToWallet(userID string, walletAuth string, contentType wallet.ContentType, content interface{}, collectionID string) error {
@@ -1122,15 +1173,32 @@ func getMockDIDKeyVDR() *mockvdr.MockVDRegistry {
 	}
 }
 
-// Posible problema: o.currentDID no definido
-// Añadir a este método la funcionalidad de comprobación de solicitud
 func setupMockEnrolmentServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		// Asegurar que la URL es la esperada
+		// Request verification
 		assert.Equal(t, "/fluidos/idm/acceptEnrolment", req.URL.Path)
+		assert.Equal(t, "POST", req.Method)
+		assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
+
+		// Decode request
+		var request AcceptEnrolmentArgs
+		err := json.NewDecoder(req.Body).Decode(&request)
+		require.NoError(t, err)
+
+		// Verify request.IdProofs have expected data
+		expectedIdProofs := []IdProof{
+			{AttrName: "holderName", AttrValue: "FluidosNode"},
+			{AttrName: "fluidosRole", AttrValue: "Customer"},
+			{AttrName: "deviceType", AttrValue: "Server"},
+			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
+			{AttrName: "physicalAddress", AttrValue: "50:80:61:82:ab:c9"},
+			{AttrName: "DID", AttrValue: "did:fabric:DuYKXxLuWnTQzBaa9p1eT1Aya98nirASjVN8dphJjYw"},
+		}
+
+		assert.ElementsMatch(t, expectedIdProofs, request.IdProofs)
 
 		issuanceDate := time.Now().Format(time.RFC3339Nano)
-		expirationDate := time.Now().AddDate(0, 0, 1).Format(time.RFC3339Nano) // Añadir un día para la fecha de expiración
+		expirationDate := time.Now().AddDate(0, 0, 1).Format(time.RFC3339Nano)
 
 		// Simulate the enrollment response
 		response := map[string]interface{}{
@@ -1169,7 +1237,7 @@ func setupMockEnrolmentServer(t *testing.T) *httptest.Server {
 		}
 
 		rw.Header().Set("Content-Type", "application/json")
-		err := json.NewEncoder(rw).Encode(response)
+		err = json.NewEncoder(rw).Encode(response)
 		require.NoError(t, err)
 	}))
 }
