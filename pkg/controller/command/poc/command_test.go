@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
+	"math/rand"
 
 	"github.com/hyperledger/aries-framework-go/pkg/controller/command/vcwallet"
 	"github.com/hyperledger/aries-framework-go/pkg/controller/command/vdr"
@@ -28,6 +29,7 @@ import (
 	mockpresentproof "github.com/hyperledger/aries-framework-go/pkg/mock/didcomm/protocol/presentproof"
 	mockprovider "github.com/hyperledger/aries-framework-go/pkg/mock/provider"
 	mockstore "github.com/hyperledger/aries-framework-go/pkg/mock/storage"
+	"github.com/mr-tron/base58"
 	"github.com/square/go-jose/v3/json"
 	"github.com/stretchr/testify/require"
 
@@ -918,12 +920,17 @@ func TestVerifyCredential(t *testing.T) {
 
 }
 
-/**
 func TestAcceptEnrolment(t *testing.T) {
 	t.Run("test AcceptEnrolment method - success", func(t *testing.T) {
 		// Simulated provider
 		mockctx := newMockProvider(t)
 		mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+		// Initialize cryptographic provider
+		tcrypto, err := tinkcrypto.New()
+		require.NoError(t, err)
+
+		mockctx.CryptoValue = tcrypto
 
 		vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
 		require.NotNil(t, vcwalletCommand)
@@ -936,28 +943,6 @@ func TestAcceptEnrolment(t *testing.T) {
 		command, err := New(vdrCommand, vcwalletCommand)
 		require.NoError(t, err)
 
-		// Generate new DID
-		purposeAuth := KeyTypePurpose{Purpose: "Authentication", KeyType: KeyTypeModel{Type: ed25519VerificationKey2018}}
-		purposeAssertion := KeyTypePurpose{Purpose: "AssertionMethod", KeyType: KeyTypeModel{Type: bls12381G1Key2022, Attrs: []string{"2"}}}
-
-		newDIDArgs := NewDIDArgs{Keys: []KeyTypePurpose{purposeAuth, purposeAssertion}, Name: sampleDIDName}
-
-		var l bytes.Buffer
-		reader, err := getReader(newDIDArgs)
-
-		require.NotNil(t, reader)
-		require.NoError(t, err)
-
-		err = command.NewDID(&l, reader)
-
-		require.NoError(t, err)
-		require.NotNil(t, command)
-
-		var response NewDIDResult
-
-		err = json.NewDecoder(&l).Decode(&response)
-		require.NoError(t, err)
-
 		// idProofs definition
 		idProofs := []IdProof{
 			{AttrName: "holderName", AttrValue: "FluidosNode"},
@@ -968,50 +953,67 @@ func TestAcceptEnrolment(t *testing.T) {
 		}
 
 		// AcceptEnrolment arguments
+		var l bytes.Buffer
 		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: idProofs}
 
-		reader, err = getReader(acceptEnrolmentArgs)
+		reader, err := getReader(acceptEnrolmentArgs)
 		require.NotNil(t, reader)
 		require.NoError(t, err)
 
 		token, lock := command.unlockWallet(t, command.walletuid, command.walletpass)
 
-		// Add correct content to wallet
+		// Add sample DID to VDR
+		command.AddDIDToVDR(t)
+
+		// Create key pair (wallet)
+		var b bytes.Buffer
+
+		reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
+			WalletAuth: vcwallet.WalletAuth{UserID: command.walletuid, Auth: token},
+			KeyType:    kms.BLS12381G2Type,
+		})
+		require.NoError(t, err)
+
+		err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
+		require.NoError(t, err)
+
+		var keyPairResponse vcwallet.CreateKeyPairResponse
+		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
+
+		// Generate random keys for wallet
+		privKeyBase58, pubKeyBase58, err := GenerateRandomBase58Keys()
+		require.NoError(t, err)
+
+		// Add correct content to wallet (type "Bls12381G1Key2020")
 		var sampleWalletKey map[string]interface{}
 		err = json.Unmarshal(testdata.SampleWalletContentKeyBase58, &sampleWalletKey)
 		require.NoError(t, err)
 
+		sampleWalletKey["privateKeyBase58"] = privKeyBase58
+		sampleWalletKey["publicKeyBase58"] = pubKeyBase58
+		sampleWalletKey["type"] = "Bls12381G1Key2020"
+		sampleWalletKey["controller"] = "did:example:randomController"
+
 		err = command.AddCredentialToWallet(command.walletuid, token, wallet.Key, sampleWalletKey, "")
 		require.NoError(t, err)
 
-		var sampleDocRes map[string]interface{}
-		err = json.Unmarshal(testdata.SampleDocResolutionResponse, &sampleDocRes)
-		require.NoError(t, err)
-
-		err = command.AddCredentialToWallet(command.walletuid, token, wallet.DIDResolutionResponse, sampleDocRes, "")
-		require.NoError(t, err)
-		// command.currentDID = "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5"
+		command.currentDID = "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5"
 
 		lock()
 
-		// fmt.Println(string(testdata.SampleWalletContentKeyBase58))
-		// fmt.Println("---")
-		// fmt.Println(string(testdata.SampleDocResolutionResponse))
-
-		// Llamar al método AcceptEnrolment
+		// AcceptEnrolment
 		err = command.AcceptEnrolment(&l, reader)
 		require.NoError(t, err)
 
-		// Verificar el resultado
-		var response2 AcceptEnrolmentResult
-		err = json.NewDecoder(&l).Decode(&response2)
+		var response AcceptEnrolmentResult
+		err = json.NewDecoder(&l).Decode(&response)
 		require.NoError(t, err)
 
 		require.NotNil(t, response)
 
-		// Imprimir el resultado de la credencial emitida
+		// Print issued credential
 		var didDoc map[string]interface{}
-		err = json.Unmarshal(response2.Credential, &didDoc)
+		err = json.Unmarshal(response.Credential, &didDoc)
 		require.NoError(t, err)
 
 		prettyDidDoc, err := json.MarshalIndent(didDoc, "", "  ")
@@ -1022,7 +1024,6 @@ func TestAcceptEnrolment(t *testing.T) {
 		fmt.Println("AcceptEnrolment executed successfully.")
 	})
 }
-**/
 
 func readDIDtesting(t *testing.T) {
 
@@ -1106,35 +1107,50 @@ func (o *Command) AddCredentialToWallet(userID string, walletAuth string, conten
 	return nil
 }
 
+// GenerateRandomBase58Keys generates public and private random keys in Base58 format
+func GenerateRandomBase58Keys() (string, string, error) {
+	privKey := make([]byte, 32)
+	_, err := rand.Read(privKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	pubKey := make([]byte, 48)
+	_, err = rand.Read(pubKey)
+	if err != nil {
+		return "", "", err
+	}
+
+	privKeyBase58 := base58.Encode(privKey)
+	pubKeyBase58 := base58.Encode(pubKey)
+
+	return privKeyBase58, pubKeyBase58, nil
+}
+
 func (o *Command) AddDIDToVDR(t *testing.T) error {
 	doc := map[string]interface{}{
 		"@context": []string{
-			"https://www.w3.org/ns/did/v1",
-			"https://w3id.org/did/v2",
+			"https://w3id.org/did/v1",
 		},
-		"id": "did:peer:21tDAKCERh95uGgKbJNHYp",
+		"id": "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5",
 		"verificationMethod": []map[string]interface{}{
 			{
-				"id":              "did:peer:123456789abcdefghi#keys-1",
-				"type":            "Secp256k1VerificationKey2018",
-				"controller":      "did:peer:123456789abcdefghi",
-				"publicKeyBase58": "H3C2AVvLMv6gmMNam3uVAjZpfkcJCwDwnZn6z3wXmqPV",
-			},
-			{
-				"id":         "did:peer:123456789abcdefghw#key2",
-				"type":       "RsaVerificationKey2018",
-				"controller": "did:peer:123456789abcdefghw",
-				"publicKeyPem": `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAryQICCl6NZ5gDKrnSztO
-3Hy8PEUcuyvg/ikC+VcIo2SFFSf18a3IMYldIugqqqZCs4/4uVW3sbdLs/6PfgdX
-7O9D22ZiFWHPYA2k2N744MNiCD1UE+tJyllUhSblK48bn+v1oZHCM0nYQ2NqUkvS
-j+hwUU3RiWl7x3D2s9wSdNt7XUtW05a/FXehsPSiJfKvHJJnGOX0BgTvkLnkAOTd
-OrUZ/wK69Dzu4IvrN4vs9Nes8vbwPa/ddZEzGR0cQMt0JBkhk9kU/qwqUseP1QRJ
-5I1jR4g8aYPL/ke9K35PxZWuDp3U0UPAZ3PjFAh+5T+fc7gzCs9dPzSHloruU+gl
-FQIDAQAB
------END PUBLIC KEY-----`,
+				"controller":      "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5",
+				"id":              "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5#key-1",
+				"publicKeyBase58": "z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5",
+				"type":            "Bls12381G1Key2020",
 			},
 		},
+		"service": []map[string]interface{}{
+			{
+				"id":              "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5#did-communication",
+				"priority":        0,
+				"recipientKeys":   []string{"did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5#key-1"},
+				"serviceEndpoint": "https://agent.example.com/",
+				"type":            "did-communication",
+			},
+		},
+		"created": "2024-11-14T18:07:41.062167792+01:00",
 	}
 
 	rawContent, err := json.Marshal(doc)
