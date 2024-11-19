@@ -55,8 +55,6 @@ import (
 const (
 	sampleDIDName = "sampleDIDName"
 	sampleCredId  = "http://example.edu/credentials/1872"
-	sampleUser1   = "sampleUser1"
-	samplePass    = "fakepassphrase"
 	sampleDID     = "did:example:123"
 	sampleURL     = "http://issuer:9082"
 )
@@ -451,6 +449,7 @@ func Test_SignVerifyJWT(t *testing.T) {
 }
 
 func TestDoDeviceEnrolment(t *testing.T) {
+
 	// DoDeviceEnrolment sample args
 	enrolmentArgs := DoDeviceEnrolmentArgs{
 		Url: sampleURL,
@@ -921,27 +920,55 @@ func TestVerifyCredential(t *testing.T) {
 }
 
 func TestAcceptEnrolment(t *testing.T) {
+
+	// Simulated provider
+	mockctx := newMockProvider(t)
+	mockctx.VDRegistryValue = getMockDIDKeyVDR()
+
+	// Initialize cryptographic provider
+	tcrypto, err := tinkcrypto.New()
+	require.NoError(t, err)
+
+	mockctx.CryptoValue = tcrypto
+
+	vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
+	require.NotNil(t, vcwalletCommand)
+
+	vdrCommand, err := vdr.New(mockctx)
+	require.NotNil(t, vdrCommand)
+	require.NoError(t, err)
+
+	// Command instance
+	command, err := New(vdrCommand, vcwalletCommand)
+	require.NoError(t, err)
+
+	// Add sample DID to VDR (mock VDR content)
+	command.AddDIDToVDR(t)
+
+	// Generate random keys for wallet
+	privKeyBase58, pubKeyBase58, err := GenerateRandomBase58Keys()
+	require.NoError(t, err)
+
+	// Add correct content to wallet (type "Bls12381G1Key2020")
+	var sampleWalletKey map[string]interface{}
+	err = json.Unmarshal(testdata.SampleWalletContentKeyBase58, &sampleWalletKey)
+	require.NoError(t, err)
+
+	sampleWalletKey["privateKeyBase58"] = privKeyBase58
+	sampleWalletKey["publicKeyBase58"] = pubKeyBase58
+	sampleWalletKey["type"] = "Bls12381G1Key2020"
+	sampleWalletKey["controller"] = "did:example:randomController"
+
+	// Success: enrolment process
 	t.Run("test AcceptEnrolment method - success", func(t *testing.T) {
-		// Simulated provider
-		mockctx := newMockProvider(t)
-		mockctx.VDRegistryValue = getMockDIDKeyVDR()
+		token, lock := command.unlockWallet(t, command.walletuid, command.walletpass)
 
-		// Initialize cryptographic provider
-		tcrypto, err := tinkcrypto.New()
+		err = command.AddCredentialToWallet(command.walletuid, token, wallet.Key, sampleWalletKey, "")
 		require.NoError(t, err)
 
-		mockctx.CryptoValue = tcrypto
+		command.currentDID = "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5"
 
-		vcwalletCommand := vcwallet.New(mockctx, &vcwallet.Config{})
-		require.NotNil(t, vcwalletCommand)
-
-		vdrCommand, err := vdr.New(mockctx)
-		require.NotNil(t, vdrCommand)
-		require.NoError(t, err)
-
-		// Command instance
-		command, err := New(vdrCommand, vcwalletCommand)
-		require.NoError(t, err)
+		lock()
 
 		// idProofs definition
 		idProofs := []IdProof{
@@ -949,7 +976,7 @@ func TestAcceptEnrolment(t *testing.T) {
 			{AttrName: "fluidosRole", AttrValue: "Customer"},
 			{AttrName: "deviceType", AttrValue: "Server"},
 			{AttrName: "orgIdentifier", AttrValue: "FLUIDOS_id_23241231412"},
-			{AttrName: "DID", AttrValue: command.currentDID},
+			{AttrName: "DID", AttrValue: "did:local:abc"},
 		}
 
 		// AcceptEnrolment arguments
@@ -959,47 +986,6 @@ func TestAcceptEnrolment(t *testing.T) {
 		reader, err := getReader(acceptEnrolmentArgs)
 		require.NotNil(t, reader)
 		require.NoError(t, err)
-
-		token, lock := command.unlockWallet(t, command.walletuid, command.walletpass)
-
-		// Add sample DID to VDR
-		command.AddDIDToVDR(t)
-
-		// Create key pair (wallet)
-		var b bytes.Buffer
-
-		reqCreateKey, err := getReader(&vcwallet.CreateKeyPairRequest{
-			WalletAuth: vcwallet.WalletAuth{UserID: command.walletuid, Auth: token},
-			KeyType:    kms.BLS12381G2Type,
-		})
-		require.NoError(t, err)
-
-		err = command.vcwalletcommand.CreateKeyPair(&b, reqCreateKey)
-		require.NoError(t, err)
-
-		var keyPairResponse vcwallet.CreateKeyPairResponse
-		require.NoError(t, json.NewDecoder(&b).Decode(&keyPairResponse))
-
-		// Generate random keys for wallet
-		privKeyBase58, pubKeyBase58, err := GenerateRandomBase58Keys()
-		require.NoError(t, err)
-
-		// Add correct content to wallet (type "Bls12381G1Key2020")
-		var sampleWalletKey map[string]interface{}
-		err = json.Unmarshal(testdata.SampleWalletContentKeyBase58, &sampleWalletKey)
-		require.NoError(t, err)
-
-		sampleWalletKey["privateKeyBase58"] = privKeyBase58
-		sampleWalletKey["publicKeyBase58"] = pubKeyBase58
-		sampleWalletKey["type"] = "Bls12381G1Key2020"
-		sampleWalletKey["controller"] = "did:example:randomController"
-
-		err = command.AddCredentialToWallet(command.walletuid, token, wallet.Key, sampleWalletKey, "")
-		require.NoError(t, err)
-
-		command.currentDID = "did:key:z6MknC1wwS6DEYwtGbZZo2QvjQjkh2qSBjb4GYmbye8dv4S5"
-
-		lock()
 
 		// AcceptEnrolment
 		err = command.AcceptEnrolment(&l, reader)
@@ -1023,6 +1009,43 @@ func TestAcceptEnrolment(t *testing.T) {
 
 		fmt.Println("AcceptEnrolment executed successfully.")
 	})
+
+	// Error case: empty idProofs
+	t.Run("test AcceptEnrolment - empty idProofs", func(t *testing.T) {
+		var l bytes.Buffer
+
+		// empty idProofs
+		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: []IdProof{}}
+
+		reader, err := getReader(acceptEnrolmentArgs)
+		require.NoError(t, err)
+
+		err = command.AcceptEnrolment(&l, reader)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "idProofs is mandatory")
+	})
+
+	// Error case: DID not found
+	t.Run("test AcceptEnrolment - DID not found", func(t *testing.T) {
+		var l bytes.Buffer
+
+		// DID not found
+		idProofs := []IdProof{
+			{AttrName: "holderName", AttrValue: "FluidosNode"},
+			{AttrName: "DID", AttrValue: "did:local:abc"},
+		}
+
+		acceptEnrolmentArgs := AcceptEnrolmentArgs{IdProofs: idProofs}
+
+		reader, err := getReader(acceptEnrolmentArgs)
+		require.NoError(t, err)
+
+		command.currentDID = "did:key:notfound"
+		err = command.AcceptEnrolment(&l, reader)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "failed to get did doc: data not found")
+	})
+
 }
 
 func readDIDtesting(t *testing.T) {
