@@ -1104,7 +1104,7 @@ func (o *Command) AddCredentialToWallet(userID string, walletAuth string, conten
 
 	rawContent, err := json.Marshal(content)
 	if err != nil {
-		return fmt.Errorf("error al convertir el contenido a json.RawMessage: %w", err)
+		return fmt.Errorf("error converting content to json.RawMessage: %w", err)
 	}
 
 	// Añadir el contenido al wallet
@@ -1118,13 +1118,13 @@ func (o *Command) AddCredentialToWallet(userID string, walletAuth string, conten
 		CollectionID: collectionID,
 	})
 	if err != nil {
-		return fmt.Errorf("error al preparar la solicitud de adición de contenido: %w", err)
+		return fmt.Errorf("error preparing request: %w", err)
 	}
 
 	var addResponse bytes.Buffer
 	err = o.vcwalletcommand.Add(&addResponse, addReader)
 	if err != nil {
-		return fmt.Errorf("error al añadir el contenido al wallet: %w", err)
+		return fmt.Errorf("error adding content to wallet: %w", err)
 	}
 
 	return nil
